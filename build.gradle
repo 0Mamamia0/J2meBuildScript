@@ -1,0 +1,386 @@
+import com.sun.istack.internal.NotNull
+
+class FileUtil {
+    static void checkExists(File file) {
+        if(!file.exists()) throw new GradleException(file.path + "not exists");
+    }
+
+    static void deleteIfExists(File file) {
+        if(file.exists()) {
+            file.delete();
+        }
+    }
+}
+
+class SimpleCmd {
+    static String cmd(String... cmd ) {
+        String[] execCommand = new String[cmd.length + 2];
+        execCommand[0] = "cmd"
+        execCommand[1] = "/c"
+        System.arraycopy(cmd, 0, execCommand, 2, cmd.length);
+        return exec(execCommand);
+    }
+
+
+    static String exec(String... cmd) {
+        ProcessBuilder build = new ProcessBuilder()
+        build.redirectErrorStream(true)
+        build.command(cmd)
+        Process process = build.start()
+        InputStreamReader inputReader = new InputStreamReader(process.getInputStream(), "UTF-8")
+        BufferedReader bufferedReader = new BufferedReader(inputReader)
+
+        StringBuilder sb = new StringBuilder();
+        String line
+        while ((line = bufferedReader.readLine()) != null) {
+            sb.append(line);
+            sb.append("\n")
+        }
+        process.waitFor()
+        return sb.toString();
+    }
+}
+
+class WTK {
+
+    File homeDir;
+    File binDir;
+    File libDir;
+
+    File emulator_exe;
+    File preverify_exe;
+    String emulatorVersion;
+    String[] libs;
+
+    WTK(String path, String[] libs) {
+
+
+        def home = new File(path);
+        def bin = new File(home, "bin");
+        def lib = new File(home, "lib");
+
+        if(!home.exists() || !bin.exists() || !lib.exists() ) {
+            throw new GradleException("WTK not exitsts");
+        }
+
+        def emulator = new File(bin, "emulator.exe");
+        def preverify = new File(bin, "preverify.exe");
+
+
+
+        this.homeDir = home;
+        this.binDir = bin;
+        this.libDir = lib;
+        this.emulator_exe = emulator;
+        this.preverify_exe = preverify;
+        this.libs = libs;
+
+        checkEmulator(emulator)
+        checkPreverify(preverify)
+        checkLibs(libs)
+    }
+
+
+    void checkEmulator(File emulator) {
+        if(!emulator.exists()) {
+            throw new GradleException("invalid WTK");
+        }
+        this.emulatorVersion = SimpleCmd.cmd(emulator.getAbsolutePath(), "-version")
+    }
+
+    void checkPreverify(File preverify) {
+        if(!preverify.exists()) {
+            throw new GradleException("invalid WTK");
+        }
+    }
+
+    void checkLibs(String[] libs) {
+        for (String lib : libs) {
+            String path = getLib(lib);
+            if(!new File(path).exists()) {
+                logger.warn("lib " + path + " not exists");
+            }
+        }
+
+    }
+
+    String getEmulatorPath() {
+        return emulator_exe.getAbsolutePath();
+    }
+
+    String getPreverifyPath() {
+        return preverify_exe.getAbsolutePath();
+    }
+
+    String getLibPath() {
+        return libDir.getAbsolutePath();
+    }
+
+    String getEmulatorVersion() {
+        return emulatorVersion
+    }
+
+
+    String getLib(String name) {
+        return getLibPath() + "/" + name;
+    }
+
+    String[] getLibs() {
+        List<String> all = new ArrayList<>();
+        for (String lib : libs) {
+            all.add(getLib(lib));
+
+        }
+        return all.toArray(new String[0])
+    }
+
+    String getClassPath() {
+        String[] libs = getLibs();
+        StringBuilder sb = new StringBuilder();
+        for (String lib : libs) {
+            sb.append(lib)
+            sb.append(';')
+        }
+        return sb.toString();
+    }
+}
+
+
+class PreverifyTask extends DefaultTask {
+    @NotNull
+    @Input
+    WTK toolkit;
+
+    @NotNull
+    @Input
+    String jar;
+
+    def classPath() {
+        def lib_dir = project.file('lib');
+        StringBuilder sb = new StringBuilder();
+
+        project.fileTree(lib_dir.path).visit { fileDetails ->
+            File file = fileDetails.file;
+            if(file.isFile() && file.name.endsWith(".jar")) {
+                sb.append(file.getAbsolutePath());
+                sb.append(";")
+            }
+        }
+
+        sb.append(toolkit.getClassPath());
+    }
+
+    @TaskAction
+    def doSelf() {
+
+        def file_jar = new File(jar);
+        def dir_verify = new File(project.buildDir, "preverify")
+
+
+        FileUtil.checkExists(file_jar)
+        FileUtil.deleteIfExists(dir_verify)
+        dir_verify.mkdirs();
+
+        def preverify = toolkit.getPreverifyPath();
+        def classpath = classPath();
+
+        project.exec {
+            workingDir(dir_verify.path)
+            commandLine(
+                    "cmd",
+                    "/c",
+                    preverify,
+                    "-classpath",
+                    classpath,
+                    "-d",
+                    dir_verify.path,
+                    file_jar.path
+            )
+        }
+    }
+}
+
+
+class J2meTask extends DefaultTask {
+    @NotNull
+    @Input
+    WTK toolkit
+
+    @NotNull
+    @Input
+    String jad
+
+
+    @TaskAction
+    def doSelf() {
+        def bin_dir = project.getProjectDir().path + "/bin"
+        def emulator= toolkit.getEmulatorPath();
+        def entry_class = project.ext.entry_class;
+
+        project.exec {
+            workingDir bin_dir
+            commandLine(
+                    "cmd",
+                    "/c",
+                    emulator,
+                    "-Xdescriptor" ,
+                    jad,
+                    entry_class
+            )
+        }
+    }
+
+}
+
+class JadTask extends DefaultTask {
+
+    @NotNull
+    @Input
+    String manifest;
+
+    @NotNull
+    @Input
+    String jar;
+
+    @NotNull
+    @Input
+    String jad;
+
+    @TaskAction
+    def doSelf() {
+        File mf = new File(manifest);
+        File jar_file = new File(jar);
+        File jad_file = new File(jad);
+
+        FileUtil.checkExists(mf);
+        FileUtil.checkExists(jar_file);
+        FileUtil.deleteIfExists(jad_file);
+
+        FileInputStream input = new FileInputStream(mf);
+        FileWriter output = new FileWriter(jad_file);
+
+        Properties properties = new Properties();
+        properties.load(input);
+        properties.put("MIDlet-Jar-Size", jar_file.length().toString());
+        properties.put("MIDlet-Jar-URL", jar_file.name)
+
+        BufferedWriter writer = new BufferedWriter(output);
+        for (String key : properties.propertyNames()) {
+            writer.write(key)
+            writer.write(": ")
+            writer.write((String) properties.get(key))
+            writer.newLine()
+        }
+        writer.flush();
+        writer.close();
+    }
+}
+
+
+// The lib you need
+String[] libs = [
+        "cldcapi11.jar",
+        "midpapi21.jar",
+        "nokiaext.jar",
+        "jsr082.jar",
+        "jsr184.jar",
+        "mmapi.jar",
+        "jsr75.jar"
+]
+
+
+// Set the path for the WTK (Wireless Toolkit) installation directory
+def wtk = new WTK("./JavaME_SDK\\WTK2", libs)
+
+
+subprojects {
+
+    apply plugin: 'java'
+
+    def jar_name = project.name + ".jar";
+    def jad_name = project.name + ".jad";
+
+    File dir_bin = project.file("bin");
+    File dir_verify =  new File(project.buildDir, "preverify");
+    File dir_archive =  new File(project.buildDir, "libs");
+
+
+    File file_manifest = project.file("MANIFEST.MF");
+    File file_archive_jar = new File(dir_archive, jar_name);
+    File file_verify_jar = new File(dir_verify, jar_name);
+    File file_jar = new File(project.file("bin"), jar_name);
+    File file_jad = new File(project.file("bin"), jad_name);
+
+
+    ext {
+        entry_class = "";
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs = ['src']
+            resources.srcDirs = ['res']
+        }
+    }
+
+
+    java {
+        sourceCompatibility = JavaVersion.VERSION_1_4
+        targetCompatibility = JavaVersion.VERSION_1_4
+    }
+
+
+    dependencies {
+        implementation files(wtk.getLibs())
+    }
+
+
+    jar {
+        manifest.from(file_manifest)
+        archiveFileName = jar_name
+    }
+
+    tasks.register('preverify', PreverifyTask) {
+        toolkit wtk
+        jar file_archive_jar.path;
+    }
+
+    tasks.register("mergeJars", Jar) {
+        archiveFileName.set(jar_name)
+        destinationDirectory.set(dir_bin)
+        manifest.from(file_manifest)
+        from {
+            project.zipTree(file_verify_jar)
+        }
+        project.fileTree('lib') {
+            include '**/*.jar'
+        }.visit {
+            File f = it.file;
+            if (f.isFile() && f.name.endsWith(".jar")) {
+                from {
+                    exclude("META-INF/MANIFEST.MF")
+                    zipTree(f)
+                }
+            }
+        }
+    }
+
+    tasks.register("jad", JadTask) {
+        manifest   file_manifest.path
+        jad        file_jad.path;
+        jar        file_jar.path
+    }
+
+    tasks.register('run', J2meTask) {
+        toolkit wtk
+        jad file_jad.path;
+    }
+
+    preverify.dependsOn(jar)
+    mergeJars.dependsOn(preverify)
+    jad.dependsOn(mergeJars)
+    run.dependsOn(jad);
+
+
+}
+
