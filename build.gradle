@@ -321,6 +321,10 @@ subprojects {
             java.srcDirs = ['src']
             resources.srcDirs = ['res']
         }
+        test {
+            java.srcDirs = []
+            resources.srcDirs = []
+        }
     }
 
 
